@@ -1,0 +1,456 @@
+<!--
+  Crystal Anamorphic Sculptor
+  ===========================
+  A browser-based tool for creating anamorphic crystal sculptures from STL files.
+
+  Usage:
+  1. Open this file in a modern browser (Chrome/Firefox/Edge)
+  2. Load an STL file using the "Load STL" button
+  3. Configure crystal size, viewing distance, slicing parameters
+  4. Click "Preview Transform" to see the anamorphic result
+  5. Click "Export STL" to download the transformed model
+
+  No server required — everything runs client-side.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crystal Anamorphic Sculptor</title>
+<style>
+  :root {
+    --bg-primary: #1a1a2e;
+    --bg-secondary: #16213e;
+    --bg-panel: #0f3460;
+    --bg-input: #1a1a3e;
+    --text-primary: #e0e0e0;
+    --text-secondary: #a0a0b0;
+    --accent: #00d4ff;
+    --accent-hover: #33ddff;
+    --border: #2a2a4e;
+    --error: #ff4466;
+    --warning: #ffaa33;
+    --success: #44ff88;
+    --panel-width: 320px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+  }
+
+  #left-panel {
+    width: var(--panel-width);
+    min-width: var(--panel-width);
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  #left-panel h1 {
+    font-size: 18px;
+    color: var(--accent);
+    text-align: center;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .section {
+    background: var(--bg-panel);
+    border-radius: 8px;
+    padding: 12px;
+  }
+
+  .section-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .input-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+
+  .input-row:last-child { margin-bottom: 0; }
+
+  .input-row label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    min-width: 60px;
+  }
+
+  input[type="number"], input[type="text"], select {
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 6px 8px;
+    border-radius: 4px;
+    font-size: 13px;
+    width: 100%;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  input[type="number"]:focus, select:focus {
+    border-color: var(--accent);
+  }
+
+  input[type="number"]:invalid {
+    border-color: var(--error);
+  }
+
+  input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+
+  .btn {
+    background: var(--bg-panel);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    width: 100%;
+    transition: all 0.2s;
+    text-align: center;
+  }
+
+  .btn:hover {
+    background: var(--accent);
+    color: var(--bg-primary);
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    color: var(--bg-primary);
+  }
+
+  .btn-primary:hover {
+    background: var(--accent-hover);
+  }
+
+  .file-label {
+    display: block;
+    text-align: center;
+    cursor: pointer;
+  }
+
+  #file-input { display: none; }
+
+  #file-name {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 6px;
+    text-align: center;
+    word-break: break-all;
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+
+  .toggle-row label {
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+
+  .toggle {
+    position: relative;
+    width: 40px;
+    height: 20px;
+    cursor: pointer;
+  }
+
+  .toggle input { display: none; }
+
+  .toggle-slider {
+    position: absolute;
+    inset: 0;
+    background: var(--border);
+    border-radius: 10px;
+    transition: background 0.2s;
+  }
+
+  .toggle-slider::before {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    left: 2px;
+    top: 2px;
+    background: var(--text-primary);
+    border-radius: 50%;
+    transition: transform 0.2s;
+  }
+
+  .toggle input:checked + .toggle-slider {
+    background: var(--accent);
+  }
+
+  .toggle input:checked + .toggle-slider::before {
+    transform: translateX(20px);
+  }
+
+  .actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  #error-msg, #warning-msg {
+    font-size: 12px;
+    padding: 8px;
+    border-radius: 4px;
+    display: none;
+  }
+
+  #error-msg {
+    background: rgba(255,68,102,0.15);
+    color: var(--error);
+    border: 1px solid var(--error);
+  }
+
+  #warning-msg {
+    background: rgba(255,170,51,0.15);
+    color: var(--warning);
+    border: 1px solid var(--warning);
+  }
+
+  #viewport-container {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+
+  #viewport-container canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  #status-bar {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    background: rgba(0,0,0,0.5);
+    padding: 4px 8px;
+    border-radius: 4px;
+  }
+
+  .triple-input {
+    display: flex;
+    gap: 6px;
+  }
+
+  .triple-input .input-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .triple-input .input-col span {
+    font-size: 10px;
+    color: var(--text-secondary);
+  }
+
+  .slice-range-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+</style>
+</head>
+<body>
+
+<div id="left-panel">
+  <h1>Crystal Anamorphic Sculptor</h1>
+
+  <!-- Load STL -->
+  <div class="section">
+    <div class="section-title">Load STL</div>
+    <label class="btn file-label" for="file-input">Choose STL File</label>
+    <input type="file" id="file-input" accept=".stl">
+    <div id="file-name">No file loaded</div>
+  </div>
+
+  <!-- Model Rotation -->
+  <div class="section">
+    <div class="section-title">Model Rotation (degrees)</div>
+    <div class="triple-input">
+      <div class="input-col">
+        <span>X</span>
+        <input type="number" id="rot-x" value="-90" min="-180" max="180" step="5">
+      </div>
+      <div class="input-col">
+        <span>Y</span>
+        <input type="number" id="rot-y" value="180" min="-180" max="180" step="5">
+      </div>
+      <div class="input-col">
+        <span>Z</span>
+        <input type="number" id="rot-z" value="0" min="-180" max="180" step="5">
+      </div>
+    </div>
+  </div>
+
+  <!-- Crystal Size -->
+  <div class="section">
+    <div class="section-title">Crystal Size (mm)</div>
+    <div class="triple-input">
+      <div class="input-col">
+        <span>X (width)</span>
+        <input type="number" id="crystal-x" value="50" min="5" max="500" step="1">
+      </div>
+      <div class="input-col">
+        <span>Y (height)</span>
+        <input type="number" id="crystal-y" value="50" min="5" max="500" step="1">
+      </div>
+      <div class="input-col">
+        <span>Z (depth)</span>
+        <input type="number" id="crystal-z" value="50" min="5" max="500" step="1">
+      </div>
+    </div>
+  </div>
+
+  <!-- Inset -->
+  <div class="section">
+    <div class="section-title">Inset / Safety Margin</div>
+    <div class="input-row">
+      <label>Inset (mm)</label>
+      <input type="number" id="inset" value="1" min="0" max="50" step="0.5">
+    </div>
+  </div>
+
+  <!-- Viewing Distance -->
+  <div class="section">
+    <div class="section-title">Viewing Distance</div>
+    <div class="input-row">
+      <label>Distance (mm)</label>
+      <input type="number" id="view-dist" value="200" min="10" max="2000" step="10">
+    </div>
+  </div>
+
+  <!-- Refractive Index -->
+  <div class="section">
+    <div class="section-title">Refractive Index</div>
+    <div class="input-row">
+      <label>n</label>
+      <input type="number" id="refract-idx" value="1.5" min="1.0" max="2.5" step="0.01">
+    </div>
+  </div>
+
+  <!-- Number of Slices -->
+  <div class="section">
+    <div class="section-title">Number of Slices</div>
+    <div class="input-row">
+      <input type="range" id="slices-range" min="2" max="50" value="8">
+      <input type="number" id="slices-num" min="2" max="50" value="8" style="width:60px">
+    </div>
+    <div class="slice-range-label"><span>2</span><span>50</span></div>
+  </div>
+
+  <!-- Slicing Mode -->
+  <div class="section">
+    <div class="section-title">Slicing Mode</div>
+    <select id="slice-mode">
+      <option value="parallel">Parallel Planes (Front to Back)</option>
+      <option value="random" selected>Random Planes (Organic Chunks)</option>
+      <option value="horizontal">Horizontal Layers</option>
+    </select>
+  </div>
+
+  <!-- Random Spread -->
+  <div class="section">
+    <div class="section-title">Depth Jitter</div>
+    <div class="toggle-row">
+      <label>Enable jitter</label>
+      <label class="toggle">
+        <input type="checkbox" id="spread-toggle" checked>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="input-row">
+      <label>Max depth (mm)</label>
+      <input type="number" id="jitter-amount" value="3" min="0" max="20" step="0.5">
+    </div>
+  </div>
+
+  <!-- Seed -->
+  <div class="section">
+    <div class="section-title">Random Seed</div>
+    <div class="input-row">
+      <label>Seed</label>
+      <input type="number" id="seed" value="42" min="0" max="999999" step="1">
+      <button class="btn" id="btn-randomize-seed" style="width:auto;padding:6px 10px;font-size:11px" title="Randomize seed">Rand</button>
+    </div>
+  </div>
+
+  <!-- Selected Piece Controls (hidden until a piece is clicked) -->
+  <div class="section" id="piece-controls" style="display:none">
+    <div class="section-title">Selected Piece <span id="piece-label" style="color:var(--text-primary)">#--</span></div>
+    <div class="input-row">
+      <label>Z Depth</label>
+      <input type="range" id="piece-z-slider" min="0" max="100" step="0.1" style="flex:1">
+      <span id="piece-z-value" style="min-width:45px;text-align:right;font-size:11px;color:var(--text-secondary)">--</span>
+    </div>
+    <div class="actions" style="margin-top:8px">
+      <button class="btn" id="btn-split-piece">Split This Piece</button>
+      <button class="btn" id="btn-deselect">Deselect</button>
+    </div>
+  </div>
+
+  <!-- Messages -->
+  <div id="error-msg"></div>
+  <div id="warning-msg"></div>
+
+  <!-- Actions -->
+  <div class="actions">
+    <button class="btn btn-primary" id="btn-preview">Preview Transform</button>
+    <button class="btn" id="btn-reset">Reset View</button>
+    <button class="btn" id="btn-export">Export STL</button>
+  </div>
+</div>
+
+<div id="viewport-container">
+  <div id="status-bar">Ready</div>
+</div>
+
+<!-- Three.js via CDN -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
