@@ -34,18 +34,18 @@ const EPS = 1e-6;
  * @param {THREE.Plane} plane - Cutting plane
  * @returns {{ front: THREE.BufferGeometry|null, back: THREE.BufferGeometry|null }}
  */
-export function splitGeometryByPlane(geometry, plane) {
+export function splitGeometryByPlane(geometry, plane, capFaces = true) {
   const triangles = extractTriangles(geometry);
   if (triangles.length === 0) return { front: null, back: null };
 
-  const { front, back } = splitTrianglesByPlane(triangles, plane);
+  const { front, back } = splitTrianglesByPlane(triangles, plane, capFaces);
   return {
     front: front.length > 0 ? trianglesToGeometry(front) : null,
     back: back.length > 0 ? trianglesToGeometry(back) : null,
   };
 }
 
-export function sliceMesh(geometry, numSlices, mode, bounds, rng, viewerPos) {
+export function sliceMesh(geometry, numSlices, mode, bounds, rng, viewerPos, capFaces = true) {
   // Extract triangles from the BufferGeometry into a workable format
   const triangles = extractTriangles(geometry);
 
@@ -67,7 +67,7 @@ export function sliceMesh(geometry, numSlices, mode, bounds, rng, viewerPos) {
         if (pieces[i].length > pieces[largestIdx].length) largestIdx = i;
       }
       const target = pieces[largestIdx];
-      const { front, back } = splitTrianglesByPlane(target, plane);
+      const { front, back } = splitTrianglesByPlane(target, plane, capFaces);
       const newPieces = pieces.filter((_, i) => i !== largestIdx);
       if (front.length > 0) newPieces.push(front);
       if (back.length > 0) newPieces.push(back);
@@ -75,7 +75,7 @@ export function sliceMesh(geometry, numSlices, mode, bounds, rng, viewerPos) {
     } else {
       const newPieces = [];
       for (const piece of pieces) {
-        const { front, back } = splitTrianglesByPlane(piece, plane);
+        const { front, back } = splitTrianglesByPlane(piece, plane, capFaces);
         if (front.length > 0) newPieces.push(front);
         if (back.length > 0) newPieces.push(back);
       }
@@ -253,7 +253,7 @@ function generatePlanes(numSlices, mode, bounds, rng, viewerPos) {
  * "front" = on the side the normal points to (positive half-space)
  * "back" = opposite side
  */
-function splitTrianglesByPlane(triangles, plane) {
+function splitTrianglesByPlane(triangles, plane, capFaces = true) {
   const front = [];
   const back = [];
   const crossSectionEdges = []; // for capping
@@ -311,7 +311,7 @@ function splitTrianglesByPlane(triangles, plane) {
   }
 
   // Cap the cross-sections (create faces to close the open cuts)
-  if (crossSectionEdges.length >= 3) {
+  if (capFaces && crossSectionEdges.length >= 3) {
     const capTris = createCap(crossSectionEdges, plane);
     // Add cap triangles to both sides (with flipped normals for back)
     for (const t of capTris) {

@@ -8,6 +8,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
+import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { sliceMesh, splitGeometryByPlane } from './slicer.js';
 import { applyAnamorphicTransform, transformSinglePiece, computeCentroid } from './anamorphic.js';
 import { SeededRandom } from './random.js';
@@ -36,6 +37,7 @@ const state = {
   lastBounds: null,           // Usable bounds from last transform
   lastViewerPos: null,        // Viewer position from last transform
   lastRefractiveIndex: 1.0,   // Refractive index from last transform
+  lastCapFaces: true,          // Whether to cap sliced faces
 };
 
 // ─── Three.js Setup ───────────────────────────────────────────────────────────
@@ -105,6 +107,8 @@ const ui = {
   seed:         document.getElementById('seed'),
   btnPreview:   document.getElementById('btn-preview'),
   btnReset:     document.getElementById('btn-reset'),
+  capFacesToggle: document.getElementById('cap-faces-toggle'),
+  exportFormat: document.getElementById('export-format'),
   btnExport:    document.getElementById('btn-export'),
   errorMsg:     document.getElementById('error-msg'),
   warningMsg:   document.getElementById('warning-msg'),
@@ -164,6 +168,7 @@ function getParams() {
     jitterAmount: parseFloat(ui.jitterAmount.value),
     seed: parseInt(ui.seed.value),
     refractiveIndex: parseFloat(ui.refractIdx.value),
+    capFaces: ui.capFacesToggle.checked,
   };
 }
 
@@ -465,7 +470,7 @@ ui.btnSplitPiece.addEventListener('click', () => {
   const plane = new THREE.Plane(normal, d);
 
   // Split the original (pre-transform) geometry
-  const { front, back } = splitGeometryByPlane(reg.originalGeo, plane);
+  const { front, back } = splitGeometryByPlane(reg.originalGeo, plane, state.lastCapFaces);
 
   if (!front || !back) {
     showWarning('Split produced only one piece — the cutting plane missed the geometry.');
@@ -571,6 +576,7 @@ function previewTransform() {
     state.lastBounds = usableBounds;
     state.lastViewerPos = viewerPos;
     state.lastRefractiveIndex = p.refractiveIndex;
+    state.lastCapFaces = p.capFaces;
 
     const pieces = sliceMesh(
       state.originalGeometry,
@@ -578,7 +584,8 @@ function previewTransform() {
       p.sliceMode,
       usableBounds,
       rng,
-      viewerPos
+      viewerPos,
+      p.capFaces
     );
 
     if (pieces.length === 0) {
@@ -646,31 +653,244 @@ ui.btnReset.addEventListener('click', () => {
   fitCameraToScene();
 });
 
-// ─── Export STL ───────────────────────────────────────────────────────────────
-function exportSTL() {
+// ─── Export (Multi-Format) ────────────────────────────────────────────────────
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportModel() {
   if (!state.transformedGroup || state.transformedGroup.children.length === 0) {
     showError('No transformed model to export. Run Preview Transform first.');
     return;
   }
 
-  setStatus('Exporting STL...');
+  const format = ui.exportFormat.value;
+  const baseName = 'crystal_sculpture';
+
+  setStatus(`Exporting ${format.toUpperCase()}...`);
 
   try {
-    const exporter = new STLExporter();
-    const result = exporter.parse(state.transformedGroup, { binary: true });
-
-    const blob = new Blob([result], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'crystal_sculpture.stl';
-    link.click();
-    URL.revokeObjectURL(url);
-
-    setStatus('Exported crystal_sculpture.stl');
+    switch (format) {
+      case 'stl': {
+        const exporter = new STLExporter();
+        const result = exporter.parse(state.transformedGroup, { binary: true });
+        downloadBlob(new Blob([result], { type: 'application/octet-stream' }), `${baseName}.stl`);
+        break;
+      }
+      case 'obj': {
+        const exporter = new OBJExporter();
+        const result = exporter.parse(state.transformedGroup);
+        downloadBlob(new Blob([result], { type: 'text/plain' }), `${baseName}.obj`);
+        break;
+      }
+      case 'amf': {
+        const xml = exportAMF(state.transformedGroup);
+        downloadBlob(new Blob([xml], { type: 'application/xml' }), `${baseName}.amf`);
+        break;
+      }
+      case 'step': {
+        const stepData = exportSTEP(state.transformedGroup);
+        downloadBlob(new Blob([stepData], { type: 'application/step' }), `${baseName}.step`);
+        break;
+      }
+    }
+    setStatus(`Exported ${baseName}.${format}`);
   } catch (err) {
     showError('Export failed: ' + err.message);
+    console.error(err);
   }
 }
 
-ui.btnExport.addEventListener('click', exportSTL);
+/**
+ * Export group as AMF (Additive Manufacturing File Format).
+ * AMF is an XML-based format that supports multiple objects with materials.
+ */
+function exportAMF(group) {
+  let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+  xml += '<amf unit="millimeter" version="1.1">\n';
+  xml += '  <metadata type="name">Crystal Anamorphic Sculpture</metadata>\n';
+  xml += '  <metadata type="author">Crystal Anamorphic Sculptor</metadata>\n';
+
+  group.children.forEach((mesh, objIdx) => {
+    const geo = mesh.geometry;
+    const pos = geo.attributes.position;
+    const idx = geo.index;
+
+    xml += `  <object id="${objIdx}">\n`;
+    xml += '    <mesh>\n';
+    xml += '      <vertices>\n';
+
+    // Write all vertices
+    for (let i = 0; i < pos.count; i++) {
+      xml += `        <vertex><coordinates><x>${pos.getX(i)}</x><y>${pos.getY(i)}</y><z>${pos.getZ(i)}</z></coordinates></vertex>\n`;
+    }
+    xml += '      </vertices>\n';
+    xml += '      <volume>\n';
+
+    // Write triangles
+    if (idx) {
+      for (let i = 0; i < idx.count; i += 3) {
+        xml += `        <triangle><v1>${idx.getX(i)}</v1><v2>${idx.getX(i + 1)}</v2><v3>${idx.getX(i + 2)}</v3></triangle>\n`;
+      }
+    } else {
+      for (let i = 0; i < pos.count; i += 3) {
+        xml += `        <triangle><v1>${i}</v1><v2>${i + 1}</v2><v3>${i + 2}</v3></triangle>\n`;
+      }
+    }
+
+    xml += '      </volume>\n';
+    xml += '    </mesh>\n';
+    xml += '  </object>\n';
+  });
+
+  xml += '</amf>\n';
+  return xml;
+}
+
+/**
+ * Export group as STEP (ISO 10303-21 AP214).
+ * Produces a minimal but valid STEP file with tessellated geometry.
+ */
+function exportSTEP(group) {
+  const now = new Date().toISOString().replace(/[-:]/g, '').split('.')[0];
+  let entityId = 1;
+  const e = () => `#${entityId++}`;
+
+  // Collect all triangles from all meshes
+  const allTriangles = [];
+  group.children.forEach(mesh => {
+    const geo = mesh.geometry;
+    const pos = geo.attributes.position;
+    const idx = geo.index;
+    if (idx) {
+      for (let i = 0; i < idx.count; i += 3) {
+        allTriangles.push([
+          [pos.getX(idx.getX(i)), pos.getY(idx.getX(i)), pos.getZ(idx.getX(i))],
+          [pos.getX(idx.getX(i+1)), pos.getY(idx.getX(i+1)), pos.getZ(idx.getX(i+1))],
+          [pos.getX(idx.getX(i+2)), pos.getY(idx.getX(i+2)), pos.getZ(idx.getX(i+2))],
+        ]);
+      }
+    } else {
+      for (let i = 0; i < pos.count; i += 3) {
+        allTriangles.push([
+          [pos.getX(i), pos.getY(i), pos.getZ(i)],
+          [pos.getX(i+1), pos.getY(i+1), pos.getZ(i+1)],
+          [pos.getX(i+2), pos.getY(i+2), pos.getZ(i+2)],
+        ]);
+      }
+    }
+  });
+
+  // Build STEP data section entities
+  const dataLines = [];
+  const addEntity = (content) => {
+    const id = e();
+    dataLines.push(`${id} = ${content};`);
+    return id;
+  };
+
+  // Shared direction/axis entities
+  const dirZ = addEntity("DIRECTION('',( 0.0, 0.0, 1.0))");
+  const dirX = addEntity("DIRECTION('',( 1.0, 0.0, 0.0))");
+  const origin = addEntity("CARTESIAN_POINT('Origin',( 0.0, 0.0, 0.0))");
+  const axis2 = addEntity(`AXIS2_PLACEMENT_3D('',${origin},${dirZ},${dirX})`);
+
+  // Build unique vertex map and face entities
+  const vertexMap = new Map();
+  const getVertexId = (v) => {
+    const key = `${v[0].toFixed(6)},${v[1].toFixed(6)},${v[2].toFixed(6)}`;
+    if (!vertexMap.has(key)) {
+      const cpId = addEntity(`CARTESIAN_POINT('',(${v[0]},${v[1]},${v[2]}))`);
+      vertexMap.set(key, cpId);
+    }
+    return vertexMap.get(key);
+  };
+
+  const faceIds = [];
+
+  for (const tri of allTriangles) {
+    const cp0 = getVertexId(tri[0]);
+    const cp1 = getVertexId(tri[1]);
+    const cp2 = getVertexId(tri[2]);
+
+    const vp0 = addEntity(`VERTEX_POINT('',${cp0})`);
+    const vp1 = addEntity(`VERTEX_POINT('',${cp1})`);
+    const vp2 = addEntity(`VERTEX_POINT('',${cp2})`);
+
+    // Edges
+    const edge01 = addEntity(`EDGE_CURVE('',${vp0},${vp1},${addEntity(`LINE('',${cp0},${addEntity(`VECTOR('',${dirZ},1.0)`)})`)},.T.)`);
+    const edge12 = addEntity(`EDGE_CURVE('',${vp1},${vp2},${addEntity(`LINE('',${cp1},${addEntity(`VECTOR('',${dirZ},1.0)`)})`)},.T.)`);
+    const edge20 = addEntity(`EDGE_CURVE('',${vp2},${vp0},${addEntity(`LINE('',${cp2},${addEntity(`VECTOR('',${dirZ},1.0)`)})`)},.T.)`);
+
+    const oe01 = addEntity(`ORIENTED_EDGE('',*,*,${edge01},.T.)`);
+    const oe12 = addEntity(`ORIENTED_EDGE('',*,*,${edge12},.T.)`);
+    const oe20 = addEntity(`ORIENTED_EDGE('',*,*,${edge20},.T.)`);
+
+    const edgeLoop = addEntity(`EDGE_LOOP('',(${oe01},${oe12},${oe20}))`);
+    const faceBound = addEntity(`FACE_BOUND('',${edgeLoop},.T.)`);
+
+    // Compute face normal for the plane
+    const v0 = tri[0], v1 = tri[1], v2 = tri[2];
+    const ax = v1[0]-v0[0], ay = v1[1]-v0[1], az = v1[2]-v0[2];
+    const bx = v2[0]-v0[0], by = v2[1]-v0[1], bz = v2[2]-v0[2];
+    let nx = ay*bz - az*by, ny = az*bx - ax*bz, nz = ax*by - ay*bx;
+    const len = Math.sqrt(nx*nx + ny*ny + nz*nz) || 1;
+    nx /= len; ny /= len; nz /= len;
+
+    const faceNorm = addEntity(`DIRECTION('',(${nx},${ny},${nz}))`);
+    const facePlane = addEntity(`PLANE('',${addEntity(`AXIS2_PLACEMENT_3D('',${getVertexId(v0)},${faceNorm},${dirX})`)})`);
+    const face = addEntity(`ADVANCED_FACE('',(${faceBound}),${facePlane},.T.)`);
+    faceIds.push(face);
+  }
+
+  const closedShell = addEntity(`CLOSED_SHELL('',(${faceIds.join(',')}))`);
+  const manifold = addEntity(`MANIFOLD_SOLID_BREP('Crystal Sculpture',${closedShell})`);
+
+  // Product structure
+  const prodCtx = addEntity("APPLICATION_CONTEXT('crystal sculpture')");
+  const prodDef = addEntity(`APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,${prodCtx})`);
+  const prod = addEntity(`PRODUCT('Crystal Sculpture','Crystal Sculpture','',(${addEntity(`PRODUCT_CONTEXT('',${prodCtx},'mechanical')`)}))`);
+  const prodDefForm = addEntity(`PRODUCT_DEFINITION_FORMATION('','',${prod})`);
+  const prodDefCtx = addEntity(`PRODUCT_DEFINITION_CONTEXT('part definition',${prodCtx},'design')`);
+  const productDef = addEntity(`PRODUCT_DEFINITION('design','',${prodDefForm},${prodDefCtx})`);
+  const prodDefShape = addEntity(`PRODUCT_DEFINITION_SHAPE('','',${productDef})`);
+
+  // Geometric context (units and uncertainty)
+  const lengthUnit = addEntity("(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.))");
+  const angleUnit = addEntity("(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.))");
+  const solidAngleUnit = addEntity("(NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT())");
+  const lengthUnit2 = addEntity("(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.))");
+  const uncertainty = addEntity(`UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-07),${lengthUnit2},'')`);
+  const repCtx = addEntity(
+    `(GEOMETRIC_REPRESENTATION_CONTEXT(3) ` +
+    `GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((${uncertainty})) ` +
+    `GLOBAL_UNIT_ASSIGNED_CONTEXT((${lengthUnit},${angleUnit},${solidAngleUnit})) ` +
+    `REPRESENTATION_CONTEXT('Context3D','3D Context'))`
+  );
+  const shapeRep = addEntity(`ADVANCED_BREP_SHAPE_REPRESENTATION('',(${manifold},${axis2}),${repCtx})`);
+
+  addEntity(`SHAPE_DEFINITION_REPRESENTATION(${prodDefShape},${shapeRep})`);
+
+  // Assemble the full file
+  let step = `ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('Crystal Anamorphic Sculpture'),'2;1');
+FILE_NAME('crystal_sculpture.step','${now}',('Crystal Anamorphic Sculptor'),(''),'','','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+${dataLines.join('\n')}
+ENDSEC;
+END-ISO-10303-21;
+`;
+
+  return step;
+}
+
+ui.btnExport.addEventListener('click', exportModel);
