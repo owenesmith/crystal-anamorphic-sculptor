@@ -67,11 +67,12 @@ scene.add(dirLight);
 const gridHelper = new THREE.GridHelper(200, 20, 0x333355, 0x222244);
 scene.add(gridHelper);
 
-// Axis helper — RGB = XYZ
-const axesHelper = new THREE.AxesHelper(40);
-scene.add(axesHelper);
+// Axis helper — RGB = XYZ, positioned at corner away from crystal
+const axesGroup = new THREE.Group();
+axesGroup.position.set(-60, -40, -30);
+const axesHelper = new THREE.AxesHelper(15);
+axesGroup.add(axesHelper);
 
-// Axis labels (sprites)
 function makeAxisLabel(text, color, position) {
   const canvas = document.createElement('canvas');
   canvas.width = 64; canvas.height = 64;
@@ -85,12 +86,13 @@ function makeAxisLabel(text, color, position) {
   const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false });
   const sprite = new THREE.Sprite(mat);
   sprite.position.copy(position);
-  sprite.scale.set(8, 8, 1);
+  sprite.scale.set(5, 5, 1);
   return sprite;
 }
-scene.add(makeAxisLabel('X', '#ff4444', new THREE.Vector3(45, 0, 0)));
-scene.add(makeAxisLabel('Y', '#44ff44', new THREE.Vector3(0, 45, 0)));
-scene.add(makeAxisLabel('Z', '#4444ff', new THREE.Vector3(0, 0, 45)));
+axesGroup.add(makeAxisLabel('X', '#ff4444', new THREE.Vector3(18, 0, 0)));
+axesGroup.add(makeAxisLabel('Y', '#44ff44', new THREE.Vector3(0, 18, 0)));
+axesGroup.add(makeAxisLabel('Z', '#4444ff', new THREE.Vector3(0, 0, 18)));
+scene.add(axesGroup);
 
 // ─── Resize Handling ──────────────────────────────────────────────────────────
 function onResize() {
@@ -1103,14 +1105,18 @@ function turntable() {
 
   const p = getParams();
   const crystalCenter = new THREE.Vector3(0, 0, p.crystalSize.z / 2);
-  const radius = Math.max(p.crystalSize.x, p.crystalSize.y, p.crystalSize.z) * 2.5;
+  const eyePos = new THREE.Vector3(0, 0, -p.viewDist);
 
-  // Start from 90 degrees (side view, +X), sweep to 0 degrees (front, -Z viewer side)
-  const startAngle = Math.PI / 2;  // side
-  const endAngle = 0;              // front
+  // Radius = distance from crystal center to eye position (on the same Y plane)
+  const radius = eyePos.distanceTo(crystalCenter);
+
+  // Start from 90 degrees (side view, +X), end at exact eye position (front, -Z)
+  // Eye is at (0, 0, -viewDist), crystal center at (0, 0, cz/2)
+  // The angle of the eye relative to crystal center in XZ plane:
+  const endAngle = Math.atan2(eyePos.x - crystalCenter.x, -(eyePos.z - crystalCenter.z));
+  const startAngle = endAngle + Math.PI / 2; // 90 degrees offset (side view)
   const duration = 2000;
   const startTime = performance.now();
-  const camY = crystalCenter.y + radius * 0.3;
 
   function animateTurntable() {
     const elapsed = performance.now() - startTime;
@@ -1119,9 +1125,10 @@ function turntable() {
 
     const angle = startAngle + (endAngle - startAngle) * ease;
 
+    // Stay on the same Y plane as the eye position (Y=0)
     camera.position.set(
       Math.sin(angle) * radius + crystalCenter.x,
-      camY,
+      eyePos.y,
       -Math.cos(angle) * radius + crystalCenter.z
     );
     controls.target.copy(crystalCenter);
@@ -1132,7 +1139,7 @@ function turntable() {
     } else {
       turntableRunning = false;
       ui.btnTurntable.disabled = false;
-      setStatus('Turntable complete');
+      setStatus('Viewing from eye position');
     }
   }
   animateTurntable();
