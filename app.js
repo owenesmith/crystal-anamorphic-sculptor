@@ -592,6 +592,9 @@ function previewTransform() {
 
   setStatus('Slicing mesh...');
 
+  // Hide reference mesh so it doesn't interfere with the transformed view
+  if (state.originalMesh) state.originalMesh.visible = false;
+
   // Remove old transformed pieces
   if (state.transformedGroup) {
     scene.remove(state.transformedGroup);
@@ -1068,8 +1071,12 @@ ui.pieceZSlider.addEventListener('pointerdown', () => { pushUndo(); });
 
 function viewFromEye() {
   const p = getParams();
-  const crystalCenter = new THREE.Vector3(0, 0, p.crystalSize.z / 2);
+  // The viewer looks straight along +Z through the front face origin (0,0,0).
+  // The anamorphic projection math uses viewerPos = (0, 0, -viewDist) with rays
+  // cast through the crystal. The camera target must be directly ahead on the Z axis
+  // so the camera looks straight into the crystal, not at an angle.
   const eyePos = new THREE.Vector3(0, 0, -p.viewDist);
+  const lookTarget = new THREE.Vector3(0, 0, 0); // front face center
 
   // Animate smoothly from current to eye position
   const startPos = camera.position.clone();
@@ -1083,7 +1090,8 @@ function viewFromEye() {
     const ease = t * (2 - t); // ease-out quadratic
 
     camera.position.lerpVectors(startPos, eyePos, ease);
-    controls.target.lerpVectors(startTarget, crystalCenter, ease);
+    controls.target.lerpVectors(startTarget, lookTarget, ease);
+    camera.up.set(0, 1, 0);
     controls.update();
 
     if (t < 1) requestAnimationFrame(animateToEye);
@@ -1104,17 +1112,16 @@ function turntable() {
   ui.btnTurntable.disabled = true;
 
   const p = getParams();
-  const crystalCenter = new THREE.Vector3(0, 0, p.crystalSize.z / 2);
+  const lookTarget = new THREE.Vector3(0, 0, 0); // front face center — same as viewFromEye
   const eyePos = new THREE.Vector3(0, 0, -p.viewDist);
 
-  // Radius = distance from crystal center to eye position (on the same Y plane)
-  const radius = eyePos.distanceTo(crystalCenter);
+  // Orbit radius = distance from front face origin to eye position
+  const radius = eyePos.distanceTo(lookTarget);
 
-  // Start from 90 degrees (side view, +X), end at exact eye position (front, -Z)
-  // Eye is at (0, 0, -viewDist), crystal center at (0, 0, cz/2)
-  // The angle of the eye relative to crystal center in XZ plane:
-  const endAngle = Math.atan2(eyePos.x - crystalCenter.x, -(eyePos.z - crystalCenter.z));
-  const startAngle = endAngle + Math.PI / 2; // 90 degrees offset (side view)
+  // Orbit around the front face origin on the Y=0 plane.
+  // End angle: eye is at (0, 0, -viewDist), target at (0,0,0) → angle = 0
+  const endAngle = 0;
+  const startAngle = Math.PI / 2; // 90 degrees (side view from +X)
   const duration = 2000;
   const startTime = performance.now();
 
@@ -1125,18 +1132,23 @@ function turntable() {
 
     const angle = startAngle + (endAngle - startAngle) * ease;
 
-    // Stay on the same Y plane as the eye position (Y=0)
+    // Orbit on Y=0 plane around front face origin
     camera.position.set(
-      Math.sin(angle) * radius + crystalCenter.x,
-      eyePos.y,
-      -Math.cos(angle) * radius + crystalCenter.z
+      Math.sin(angle) * radius,
+      0,
+      -Math.cos(angle) * radius
     );
-    controls.target.copy(crystalCenter);
+    controls.target.copy(lookTarget);
+    camera.up.set(0, 1, 0);
     controls.update();
 
     if (t < 1) {
       requestAnimationFrame(animateTurntable);
     } else {
+      // Snap to exact eye position at the end
+      camera.position.copy(eyePos);
+      controls.target.copy(lookTarget);
+      controls.update();
       turntableRunning = false;
       ui.btnTurntable.disabled = false;
       setStatus('Viewing from eye position');
