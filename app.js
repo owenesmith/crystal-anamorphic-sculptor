@@ -38,6 +38,7 @@ const state = {
   lastViewerPos: null,        // Viewer position from last transform
   lastRefractiveIndex: 1.0,   // Refractive index from last transform
   lastCapFaces: true,          // Whether to cap sliced faces
+  refractiveCrystal: null,     // MeshPhysicalMaterial crystal for refraction preview
 };
 
 // ─── Three.js Setup ───────────────────────────────────────────────────────────
@@ -45,6 +46,8 @@ const container = document.getElementById('viewport-container');
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setClearColor(0x111122);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
 container.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -147,6 +150,9 @@ const ui = {
   pieceZValue:   document.getElementById('piece-z-value'),
   btnSplitPiece: document.getElementById('btn-split-piece'),
   btnDeselect:   document.getElementById('btn-deselect'),
+  modelScale:    document.getElementById('model-scale'),
+  modelScaleValue: document.getElementById('model-scale-value'),
+  refractPreviewToggle: document.getElementById('refract-preview-toggle'),
   // New controls
   btnUndo:       document.getElementById('btn-undo'),
   btnRedo:       document.getElementById('btn-redo'),
@@ -164,6 +170,12 @@ ui.slicesNum.addEventListener('input', () => { ui.slicesRange.value = ui.slicesN
 // Randomize seed button
 document.getElementById('btn-randomize-seed').addEventListener('click', () => {
   ui.seed.value = Math.floor(Math.random() * 999999);
+});
+
+// Model scale slider sync
+ui.modelScale.addEventListener('input', () => {
+  ui.modelScaleValue.textContent = Math.round(parseFloat(ui.modelScale.value) * 100) + '%';
+  applyModelRotation();
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -204,6 +216,7 @@ function getParams() {
     seed: parseInt(ui.seed.value),
     refractiveIndex: parseFloat(ui.refractIdx.value),
     capFaces: ui.capFacesToggle.checked,
+    modelScale: parseFloat(ui.modelScale.value),
   };
 }
 
@@ -225,10 +238,11 @@ function updateCrystalBounds() {
   const p = getParams();
   const cx = p.crystalSize.x, cy = p.crystalSize.y, cz = p.crystalSize.z;
 
-  // Remove old boxes
+  // Remove old objects
   if (state.crystalBox) scene.remove(state.crystalBox);
   if (state.innerBox) scene.remove(state.innerBox);
   if (state.viewerIndicator) scene.remove(state.viewerIndicator);
+  if (state.refractiveCrystal) scene.remove(state.refractiveCrystal);
 
   // Outer crystal wireframe — centered at origin with front face at Z=0, back face at Z=cz
   const outerGeo = new THREE.BoxGeometry(cx, cy, cz);
@@ -255,13 +269,39 @@ function updateCrystalBounds() {
   state.viewerIndicator.position.set(0, 0, -p.viewDist);
   state.viewerIndicator.rotation.x = Math.PI / 2;
   scene.add(state.viewerIndicator);
+
+  // Refractive crystal solid (for viewport refraction simulation)
+  const refractGeo = new THREE.BoxGeometry(cx, cy, cz);
+  const refractMat = new THREE.MeshPhysicalMaterial({
+    transmission: 1.0,
+    thickness: cz,
+    ior: p.refractiveIndex,
+    roughness: 0.0,
+    metalness: 0.0,
+    color: 0xffffff,
+    transparent: true,
+    side: THREE.FrontSide,
+    depthWrite: false,
+  });
+  state.refractiveCrystal = new THREE.Mesh(refractGeo, refractMat);
+  state.refractiveCrystal.position.set(0, 0, cz / 2);
+  state.refractiveCrystal.visible = ui.refractPreviewToggle.checked;
+  state.refractiveCrystal.renderOrder = 999; // render last for transparency
+  scene.add(state.refractiveCrystal);
 }
 
 // Update bounds whenever parameters change
-['crystal-x', 'crystal-y', 'crystal-z', 'inset', 'view-dist'].forEach(id => {
+['crystal-x', 'crystal-y', 'crystal-z', 'inset', 'view-dist', 'refract-idx'].forEach(id => {
   document.getElementById(id).addEventListener('change', updateCrystalBounds);
 });
 updateCrystalBounds();
+
+// Toggle refractive crystal visibility
+ui.refractPreviewToggle.addEventListener('change', () => {
+  if (state.refractiveCrystal) {
+    state.refractiveCrystal.visible = ui.refractPreviewToggle.checked;
+  }
+});
 
 // ─── Load STL ─────────────────────────────────────────────────────────────────
 function loadSTL(file) {
@@ -331,7 +371,7 @@ function applyModelRotation() {
     usable.x / size.x,
     usable.y / size.y,
     usable.z / size.z
-  );
+  ) * p.modelScale; // Apply model scale to give headroom for depth adjustment
 
   geo.scale(scaleFactor, scaleFactor, scaleFactor);
 
@@ -356,8 +396,8 @@ function applyModelRotation() {
   scene.add(state.originalMesh);
 }
 
-// Listen for rotation changes
-['rot-x', 'rot-y', 'rot-z'].forEach(id => {
+// Listen for rotation and crystal size changes — all affect model positioning
+['rot-x', 'rot-y', 'rot-z', 'crystal-x', 'crystal-y', 'crystal-z', 'inset'].forEach(id => {
   document.getElementById(id).addEventListener('change', applyModelRotation);
 });
 
@@ -418,6 +458,38 @@ function handlePieceClick(event) {
   }
 }
 
+/**
+ * Find the valid z-range where a piece fits within bounds without clamping.
+ * Samples z values to find the min and max that don't cause overflow.
+ */
+function computeValidZRange(geo, centroid, bounds, viewerPos, refractiveIndex) {
+  const zMin = bounds.minZ;
+  const zMax = bounds.maxZ;
+  const steps = 50;
+  const dz = (zMax - zMin) / steps;
+  let validMin = zMin;
+  let validMax = zMax;
+  let foundMin = false;
+
+  for (let i = 0; i <= steps; i++) {
+    const z = zMin + i * dz;
+    const result = transformSinglePiece(geo, centroid, z, viewerPos, bounds, refractiveIndex);
+    if (!result.wasClamped) {
+      if (!foundMin) { validMin = z; foundMin = true; }
+      validMax = z;
+    }
+    result.geometry.dispose();
+  }
+
+  // Ensure at least a small range
+  if (validMin >= validMax) {
+    validMin = zMin;
+    validMax = zMax;
+  }
+
+  return { validMin, validMax };
+}
+
 function selectPiece(index) {
   state.selectedPieceIndex = index;
   const reg = state.pieceRegistry[index];
@@ -437,14 +509,19 @@ function selectPiece(index) {
   ui.pieceControls.style.display = '';
   ui.pieceLabel.textContent = `#${index + 1} / ${state.pieceRegistry.length}`;
 
-  // Configure slider
+  // Compute valid z-range for this piece (where it stays within bounds without clamping)
   const bounds = state.lastBounds;
-  ui.pieceZSlider.min = bounds.minZ;
-  ui.pieceZSlider.max = bounds.maxZ;
-  ui.pieceZSlider.value = reg.zSlot;
+  const { validMin, validMax } = computeValidZRange(
+    reg.originalGeo, reg.centroid, bounds, state.lastViewerPos, state.lastRefractiveIndex
+  );
+
+  ui.pieceZSlider.min = validMin;
+  ui.pieceZSlider.max = validMax;
+  ui.pieceZSlider.step = (validMax - validMin) / 200;
+  ui.pieceZSlider.value = Math.max(validMin, Math.min(validMax, reg.zSlot));
   ui.pieceZValue.textContent = reg.zSlot.toFixed(1) + ' mm';
 
-  setStatus(`Selected piece ${index + 1}`);
+  setStatus(`Selected piece ${index + 1} — valid depth: ${validMin.toFixed(1)}–${validMax.toFixed(1)} mm`);
 }
 
 function deselectPiece() {
@@ -1181,6 +1258,7 @@ function saveProject() {
       rotX: parseFloat(ui.rotX.value) || 0,
       rotY: parseFloat(ui.rotY.value) || 0,
       rotZ: parseFloat(ui.rotZ.value) || 0,
+      modelScale: p.modelScale,
     },
     fileName: state.fileName,
   };
@@ -1230,6 +1308,10 @@ function loadProject(file) {
       ui.rotX.value = pp.rotX;
       ui.rotY.value = pp.rotY;
       ui.rotZ.value = pp.rotZ;
+      if (pp.modelScale !== undefined) {
+        ui.modelScale.value = pp.modelScale;
+        ui.modelScaleValue.textContent = Math.round(pp.modelScale * 100) + '%';
+      }
 
       state.fileName = project.fileName;
       ui.fileName.textContent = project.fileName || 'Loaded from project';
