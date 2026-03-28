@@ -67,6 +67,31 @@ scene.add(dirLight);
 const gridHelper = new THREE.GridHelper(200, 20, 0x333355, 0x222244);
 scene.add(gridHelper);
 
+// Axis helper — RGB = XYZ
+const axesHelper = new THREE.AxesHelper(40);
+scene.add(axesHelper);
+
+// Axis labels (sprites)
+function makeAxisLabel(text, color, position) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64; canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.font = 'bold 48px sans-serif';
+  ctx.fillStyle = color;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, 32, 32);
+  const texture = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: texture, depthTest: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.position.copy(position);
+  sprite.scale.set(8, 8, 1);
+  return sprite;
+}
+scene.add(makeAxisLabel('X', '#ff4444', new THREE.Vector3(45, 0, 0)));
+scene.add(makeAxisLabel('Y', '#44ff44', new THREE.Vector3(0, 45, 0)));
+scene.add(makeAxisLabel('Z', '#4444ff', new THREE.Vector3(0, 0, 45)));
+
 // ─── Resize Handling ──────────────────────────────────────────────────────────
 function onResize() {
   const w = container.clientWidth;
@@ -120,6 +145,14 @@ const ui = {
   pieceZValue:   document.getElementById('piece-z-value'),
   btnSplitPiece: document.getElementById('btn-split-piece'),
   btnDeselect:   document.getElementById('btn-deselect'),
+  // New controls
+  btnUndo:       document.getElementById('btn-undo'),
+  btnRedo:       document.getElementById('btn-redo'),
+  btnViewEye:    document.getElementById('btn-view-eye'),
+  btnTurntable:  document.getElementById('btn-turntable'),
+  btnSaveProject:  document.getElementById('btn-save-project'),
+  btnLoadProject:  document.getElementById('btn-load-project'),
+  projectFileInput: document.getElementById('project-file-input'),
 };
 
 // Sync sliders
@@ -894,3 +927,324 @@ END-ISO-10303-21;
 }
 
 ui.btnExport.addEventListener('click', exportModel);
+
+// ─── Undo / Redo ──────────────────────────────────────────────────────────────
+
+const undoStack = [];
+const redoStack = [];
+const MAX_UNDO = 30;
+
+function captureSnapshot() {
+  if (!state.transformedGroup || state.pieceRegistry.length === 0) return null;
+  return {
+    registry: state.pieceRegistry.map(r => ({
+      originalGeoData: serializeGeo(r.originalGeo),
+      centroid: { x: r.centroid.x, y: r.centroid.y, z: r.centroid.z },
+      zSlot: r.zSlot,
+      colorIndex: r.colorIndex,
+    })),
+    bounds: { ...state.lastBounds },
+    viewerPos: { x: state.lastViewerPos.x, y: state.lastViewerPos.y, z: state.lastViewerPos.z },
+    refractiveIndex: state.lastRefractiveIndex,
+    capFaces: state.lastCapFaces,
+  };
+}
+
+function serializeGeo(geo) {
+  const pos = geo.attributes.position;
+  return Array.from(pos.array);
+}
+
+function deserializeGeo(data) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(data), 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function pushUndo() {
+  const snap = captureSnapshot();
+  if (!snap) return;
+  undoStack.push(snap);
+  if (undoStack.length > MAX_UNDO) undoStack.shift();
+  redoStack.length = 0;
+  updateUndoRedoButtons();
+}
+
+function restoreSnapshot(snap) {
+  deselectPiece();
+
+  // Remove old group
+  if (state.transformedGroup) {
+    scene.remove(state.transformedGroup);
+    state.transformedGroup.traverse(child => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) child.material.dispose();
+    });
+  }
+
+  state.lastBounds = snap.bounds;
+  state.lastViewerPos = new THREE.Vector3(snap.viewerPos.x, snap.viewerPos.y, snap.viewerPos.z);
+  state.lastRefractiveIndex = snap.refractiveIndex;
+  state.lastCapFaces = snap.capFaces;
+
+  state.transformedGroup = new THREE.Group();
+  state.pieceRegistry = [];
+
+  for (const r of snap.registry) {
+    const originalGeo = deserializeGeo(r.originalGeoData);
+    const centroid = new THREE.Vector3(r.centroid.x, r.centroid.y, r.centroid.z);
+    const result = transformSinglePiece(originalGeo, centroid, r.zSlot, state.lastViewerPos, state.lastBounds, state.lastRefractiveIndex);
+    const mesh = new THREE.Mesh(result.geometry, new THREE.MeshPhongMaterial({
+      color: PIECE_COLORS[r.colorIndex], transparent: true, opacity: 0.75, side: THREE.DoubleSide,
+    }));
+    state.transformedGroup.add(mesh);
+    state.pieceRegistry.push({
+      originalGeo, centroid, zSlot: r.zSlot, colorIndex: r.colorIndex,
+    });
+  }
+
+  scene.add(state.transformedGroup);
+  setStatus(`${state.pieceRegistry.length} pieces`);
+}
+
+function undo() {
+  if (undoStack.length === 0) return;
+  const current = captureSnapshot();
+  if (current) redoStack.push(current);
+  restoreSnapshot(undoStack.pop());
+  updateUndoRedoButtons();
+}
+
+function redo() {
+  if (redoStack.length === 0) return;
+  const current = captureSnapshot();
+  if (current) undoStack.push(current);
+  restoreSnapshot(redoStack.pop());
+  updateUndoRedoButtons();
+}
+
+function updateUndoRedoButtons() {
+  ui.btnUndo.disabled = undoStack.length === 0;
+  ui.btnRedo.disabled = redoStack.length === 0;
+}
+
+ui.btnUndo.addEventListener('click', undo);
+ui.btnRedo.addEventListener('click', redo);
+
+// Keyboard shortcuts
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+    e.preventDefault();
+    undo();
+  } else if ((e.ctrlKey || e.metaKey) && (e.key === 'Z' || (e.key === 'z' && e.shiftKey))) {
+    e.preventDefault();
+    redo();
+  }
+});
+
+// Hook into actions that modify pieces — push undo before they execute
+
+// Wrap the preview button to push undo before transform
+const origPreviewHandler = previewTransform;
+function previewWithUndo() {
+  pushUndo();
+  origPreviewHandler();
+  updateUndoRedoButtons();
+}
+ui.btnPreview.removeEventListener('click', previewTransform);
+ui.btnPreview.addEventListener('click', previewWithUndo);
+
+// Wrap split piece to push undo
+const origSplitHandler = ui.btnSplitPiece.onclick;
+ui.btnSplitPiece.addEventListener('click', () => { pushUndo(); }, true);
+
+// Push undo on z-slider change (debounced — only on pointerup/change)
+ui.pieceZSlider.addEventListener('pointerdown', () => { pushUndo(); });
+
+// ─── View From Eye ────────────────────────────────────────────────────────────
+
+function viewFromEye() {
+  const p = getParams();
+  const crystalCenter = new THREE.Vector3(0, 0, p.crystalSize.z / 2);
+  const eyePos = new THREE.Vector3(0, 0, -p.viewDist);
+
+  // Animate smoothly from current to eye position
+  const startPos = camera.position.clone();
+  const startTarget = controls.target.clone();
+  const duration = 600;
+  const startTime = performance.now();
+
+  function animateToEye() {
+    const elapsed = performance.now() - startTime;
+    const t = Math.min(1, elapsed / duration);
+    const ease = t * (2 - t); // ease-out quadratic
+
+    camera.position.lerpVectors(startPos, eyePos, ease);
+    controls.target.lerpVectors(startTarget, crystalCenter, ease);
+    controls.update();
+
+    if (t < 1) requestAnimationFrame(animateToEye);
+  }
+  animateToEye();
+  setStatus('Viewing from eye position');
+}
+
+ui.btnViewEye.addEventListener('click', viewFromEye);
+
+// ─── Turntable Animation ──────────────────────────────────────────────────────
+
+let turntableRunning = false;
+
+function turntable() {
+  if (turntableRunning) return;
+  turntableRunning = true;
+  ui.btnTurntable.disabled = true;
+
+  const p = getParams();
+  const crystalCenter = new THREE.Vector3(0, 0, p.crystalSize.z / 2);
+  const radius = Math.max(p.crystalSize.x, p.crystalSize.y, p.crystalSize.z) * 2.5;
+
+  // Start from 90 degrees (side view, +X), sweep to 0 degrees (front, -Z viewer side)
+  const startAngle = Math.PI / 2;  // side
+  const endAngle = 0;              // front
+  const duration = 2000;
+  const startTime = performance.now();
+  const camY = crystalCenter.y + radius * 0.3;
+
+  function animateTurntable() {
+    const elapsed = performance.now() - startTime;
+    const t = Math.min(1, elapsed / duration);
+    const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; // ease in-out
+
+    const angle = startAngle + (endAngle - startAngle) * ease;
+
+    camera.position.set(
+      Math.sin(angle) * radius + crystalCenter.x,
+      camY,
+      -Math.cos(angle) * radius + crystalCenter.z
+    );
+    controls.target.copy(crystalCenter);
+    controls.update();
+
+    if (t < 1) {
+      requestAnimationFrame(animateTurntable);
+    } else {
+      turntableRunning = false;
+      ui.btnTurntable.disabled = false;
+      setStatus('Turntable complete');
+    }
+  }
+  animateTurntable();
+  setStatus('Turntable...');
+}
+
+ui.btnTurntable.addEventListener('click', turntable);
+
+// ─── Save / Load Project ──────────────────────────────────────────────────────
+
+function saveProject() {
+  const p = getParams();
+
+  const project = {
+    version: 1,
+    params: {
+      crystalX: p.crystalSize.x, crystalY: p.crystalSize.y, crystalZ: p.crystalSize.z,
+      inset: p.inset,
+      viewDist: p.viewDist,
+      refractiveIndex: p.refractiveIndex,
+      numSlices: p.numSlices,
+      sliceMode: p.sliceMode,
+      capFaces: p.capFaces,
+      spreadEnabled: p.spreadEnabled,
+      jitterAmount: p.jitterAmount,
+      seed: p.seed,
+      rotX: parseFloat(ui.rotX.value) || 0,
+      rotY: parseFloat(ui.rotY.value) || 0,
+      rotZ: parseFloat(ui.rotZ.value) || 0,
+    },
+    fileName: state.fileName,
+  };
+
+  // Include raw geometry if loaded
+  if (state.rawGeometry) {
+    project.rawGeometry = Array.from(state.rawGeometry.attributes.position.array);
+  }
+
+  // Include piece state if transformed
+  if (state.pieceRegistry.length > 0 && state.lastBounds) {
+    project.pieceState = captureSnapshot();
+  }
+
+  const json = JSON.stringify(project);
+  const blob = new Blob([json], { type: 'application/json' });
+  downloadBlob(blob, `crystal_project_${Date.now()}.json`);
+  setStatus('Project saved');
+}
+
+function loadProject(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const project = JSON.parse(e.target.result);
+
+      if (!project.version || !project.params) {
+        showError('Invalid project file.');
+        return;
+      }
+
+      // Restore params to UI
+      const pp = project.params;
+      ui.crystalX.value = pp.crystalX;
+      ui.crystalY.value = pp.crystalY;
+      ui.crystalZ.value = pp.crystalZ;
+      ui.inset.value = pp.inset;
+      ui.viewDist.value = pp.viewDist;
+      ui.refractIdx.value = pp.refractiveIndex;
+      ui.slicesNum.value = pp.numSlices;
+      ui.slicesRange.value = pp.numSlices;
+      ui.sliceMode.value = pp.sliceMode;
+      ui.capFacesToggle.checked = pp.capFaces;
+      ui.spreadToggle.checked = pp.spreadEnabled;
+      ui.jitterAmount.value = pp.jitterAmount;
+      ui.seed.value = pp.seed;
+      ui.rotX.value = pp.rotX;
+      ui.rotY.value = pp.rotY;
+      ui.rotZ.value = pp.rotZ;
+
+      state.fileName = project.fileName;
+      ui.fileName.textContent = project.fileName || 'Loaded from project';
+
+      // Restore raw geometry
+      if (project.rawGeometry) {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(project.rawGeometry), 3));
+        geo.computeBoundingBox();
+        geo.computeVertexNormals();
+        state.rawGeometry = geo;
+        applyModelRotation();
+      }
+
+      updateCrystalBounds();
+
+      // Restore piece state
+      if (project.pieceState) {
+        restoreSnapshot(project.pieceState);
+      }
+
+      fitCameraToScene();
+      setStatus('Project loaded');
+    } catch (err) {
+      showError('Failed to load project: ' + err.message);
+      console.error(err);
+    }
+  };
+  reader.readAsText(file);
+}
+
+ui.btnSaveProject.addEventListener('click', saveProject);
+ui.btnLoadProject.addEventListener('click', () => ui.projectFileInput.click());
+ui.projectFileInput.addEventListener('change', (e) => {
+  if (e.target.files.length > 0) loadProject(e.target.files[0]);
+  e.target.value = ''; // reset so same file can be reloaded
+});

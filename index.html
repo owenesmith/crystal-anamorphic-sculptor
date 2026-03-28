@@ -220,6 +220,27 @@
     gap: 8px;
   }
 
+  .btn-row {
+    display: flex;
+    gap: 6px;
+  }
+
+  .btn-row .btn {
+    flex: 1;
+  }
+
+  .btn-small {
+    padding: 6px 10px;
+    font-size: 11px;
+    width: auto;
+  }
+
+  .btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+
   #error-msg, #warning-msg {
     font-size: 12px;
     padding: 8px;
@@ -445,6 +466,14 @@
   <!-- Actions -->
   <div class="actions">
     <button class="btn btn-primary" id="btn-preview">Preview Transform</button>
+    <div class="btn-row">
+      <button class="btn" id="btn-undo" disabled title="Undo (Ctrl+Z)">Undo</button>
+      <button class="btn" id="btn-redo" disabled title="Redo (Ctrl+Shift+Z)">Redo</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn" id="btn-view-eye" title="Snap camera to viewer eye position">View from Eye</button>
+      <button class="btn" id="btn-turntable" title="Animate side-to-front rotation">Turntable</button>
+    </div>
     <button class="btn" id="btn-reset">Reset View</button>
     <div class="input-row" style="gap:6px">
       <select id="export-format" style="flex:1">
@@ -455,6 +484,11 @@
       </select>
       <button class="btn" id="btn-export" style="width:auto;padding:8px 16px">Export</button>
     </div>
+    <div class="btn-row">
+      <button class="btn" id="btn-save-project">Save Project</button>
+      <button class="btn" id="btn-load-project">Load Project</button>
+    </div>
+    <input type="file" id="project-file-input" accept=".json" style="display:none">
   </div>
 </div>
 
